@@ -16,6 +16,7 @@ from flask import (
     g,
     make_response,
     render_template_string,
+    get_flashed_messages,
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 
