@@ -38,8 +38,7 @@ if os.environ.get("SESSION_COOKIE_DOMAIN"):
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 30
-
-DB_PATH = Path(os.environ.get("DB_PATH", BASE_DIR / "luvdiscsweb.db"))
+DB_PATH = Path(os.environ.get("DB_PATH", "/tmp/luvdiscsweb/app.db"))
 VISITOR_COOKIE_NAME = "luv_visitor_id"
 VISITOR_COOKIE_DAYS = 365
 
