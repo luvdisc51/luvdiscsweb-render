@@ -14,18 +14,17 @@ from flask import (
     session,
     flash,
     g,
-    make_response,
     render_template_string,
     get_flashed_messages,
 )
+
 from werkzeug.security import generate_password_hash, check_password_hash
 
 
 app = Flask(__name__)
 
-# IMPORTANT:
-# On Render free, do NOT use /var/data unless you have disks.
-# Set this Render env var:
+# Render Free cannot use /var/data unless you have a paid persistent disk.
+# Use this env var on Render:
 # DB_PATH=/tmp/luvdiscsweb/luvdiscsweb.db
 DB_PATH = Path(os.environ.get("DB_PATH", "/tmp/luvdiscsweb/luvdiscsweb.db"))
 
@@ -34,11 +33,12 @@ app.secret_key = os.environ.get("SECRET_KEY", "change-this-secret-key-in-render"
 MAIN_BASE_URL = os.environ.get("MAIN_BASE_URL", "https://luvdiscsweb.xyz").rstrip("/")
 XTRA_BASE_URL = os.environ.get("XTRA_BASE_URL", "https://xtra.luvdiscsweb.xyz").rstrip("/")
 
+
 PLANS = {
     "premium": {
         "name": "Premium",
         "price": "$0.99",
-        "description": "Get all premium games.",
+        "description": "Unlock multiplayer for Price is Right, Wheel of Fortune, and Jeopardy.",
     },
     "super_premium": {
         "name": "Super Premium",
@@ -49,6 +49,28 @@ PLANS = {
         "name": "Supporter",
         "price": "$4.99",
         "description": "All things of previous tiers, early access to new games, and much more!",
+    },
+}
+
+PLAN_RANK = {
+    "free": 0,
+    "premium": 1,
+    "super_premium": 2,
+    "supporter": 3,
+}
+
+GAME_SHOWS = {
+    "price-is-right": {
+        "name": "Price is Right",
+        "description": "Guess prices and try to get closest without going over.",
+    },
+    "wheel-of-fortune": {
+        "name": "Wheel of Fortune",
+        "description": "Spin, guess letters, and solve the puzzle.",
+    },
+    "jeopardy": {
+        "name": "Jeopardy",
+        "description": "Pick categories and answer trivia questions.",
     },
 }
 
@@ -72,10 +94,16 @@ def add_months(dt, months):
 def parse_dt(value):
     if not value:
         return None
+
     try:
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return parsed
 
 
 def db():
@@ -145,6 +173,7 @@ def init_db():
                 "INSERT INTO settings (key, value) VALUES (?, ?)",
                 ("admin_username", default_admin_username),
             )
+
             conn.execute(
                 "INSERT INTO settings (key, value) VALUES (?, ?)",
                 ("admin_password_hash", generate_password_hash(default_admin_password)),
@@ -153,8 +182,15 @@ def init_db():
 
 def get_setting(key, default=None):
     with db() as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
-        return row["value"] if row else default
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = ?",
+            (key,),
+        ).fetchone()
+
+        if row:
+            return row["value"]
+
+        return default
 
 
 def set_setting(key, value):
@@ -171,11 +207,40 @@ def set_setting(key, value):
 
 def current_user():
     user_id = session.get("user_id")
+
     if not user_id:
         return None
 
     with db() as conn:
-        return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return conn.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+
+
+def active_plan_for_user(user):
+    if not user:
+        return "free"
+
+    plan = user["plan"] or "free"
+
+    if plan == "free":
+        return "free"
+
+    expires_at = parse_dt(user["plan_expires_at"])
+
+    if not expires_at:
+        return "free"
+
+    if expires_at < now_utc():
+        return "free"
+
+    return plan
+
+
+def user_has_plan(user, required_plan):
+    user_plan = active_plan_for_user(user)
+    return PLAN_RANK.get(user_plan, 0) >= PLAN_RANK.get(required_plan, 0)
 
 
 def login_required(func):
@@ -184,6 +249,7 @@ def login_required(func):
         if not current_user():
             flash("Please log in first.")
             return redirect("/login")
+
         return func(*args, **kwargs)
 
     return wrapper
@@ -195,6 +261,7 @@ def admin_required(func):
         if not session.get("admin_logged_in"):
             flash("Admin login required.")
             return redirect("/admin/login")
+
         return func(*args, **kwargs)
 
     return wrapper
@@ -211,6 +278,7 @@ def before_request():
         return
 
     visitor_id = request.cookies.get("visitor_id")
+
     if not visitor_id:
         visitor_id = secrets.token_hex(16)
         g.new_visitor_id = visitor_id
@@ -218,6 +286,7 @@ def before_request():
     user_agent = request.headers.get("User-Agent", "")
     ip = request.headers.get("X-Forwarded-For", request.remote_addr or "")
     ip = ip.split(",")[0].strip()
+
     path = request.path
     host = request.host
     timestamp = now_iso()
@@ -234,8 +303,12 @@ def before_request():
             """,
             (visitor_id, timestamp, timestamp, user_agent, ip),
         )
+
         conn.execute(
-            "INSERT INTO page_views (visitor_id, path, host, viewed_at) VALUES (?, ?, ?, ?)",
+            """
+            INSERT INTO page_views (visitor_id, path, host, viewed_at)
+            VALUES (?, ?, ?, ?)
+            """,
             (visitor_id, path, host, timestamp),
         )
 
@@ -250,6 +323,7 @@ def after_request(response):
             httponly=True,
             samesite="Lax",
         )
+
     return response
 
 
@@ -259,6 +333,7 @@ BASE_HTML = """
 <head>
     <title>{{ title }} - LuvdiscsWeb</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -267,17 +342,20 @@ BASE_HTML = """
             margin: 0;
             padding: 0;
         }
+
         header {
             background: #ff74bd;
             color: white;
             padding: 18px;
             text-align: center;
         }
+
         nav {
             background: #ffd1e9;
             padding: 12px;
             text-align: center;
         }
+
         nav a {
             margin: 6px;
             display: inline-block;
@@ -285,6 +363,7 @@ BASE_HTML = """
             font-weight: bold;
             text-decoration: none;
         }
+
         main {
             max-width: 900px;
             margin: 24px auto;
@@ -293,6 +372,7 @@ BASE_HTML = """
             border-radius: 18px;
             box-shadow: 0 6px 20px rgba(0,0,0,0.12);
         }
+
         button, .button {
             background: #ff4cad;
             color: white;
@@ -305,9 +385,11 @@ BASE_HTML = """
             display: inline-block;
             margin: 6px 0;
         }
+
         button:hover, .button:hover {
             background: #d9007c;
         }
+
         input, select {
             padding: 10px;
             border: 1px solid #ccc;
@@ -317,33 +399,43 @@ BASE_HTML = """
             max-width: 420px;
             display: block;
         }
+
         .cards {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
             gap: 16px;
         }
+
         .card {
             border: 2px solid #ffd1e9;
             border-radius: 16px;
             padding: 16px;
             background: #fff7fb;
         }
+
+        .locked {
+            opacity: 0.85;
+        }
+
         .message {
             background: #fff0b3;
             padding: 10px;
             border-radius: 10px;
             margin-bottom: 10px;
         }
+
         table {
             width: 100%;
             border-collapse: collapse;
             overflow-wrap: anywhere;
         }
+
         th, td {
             border-bottom: 1px solid #ffd1e9;
             padding: 8px;
             text-align: left;
         }
+
         code {
             background: #f4f4f4;
             padding: 2px 5px;
@@ -351,6 +443,7 @@ BASE_HTML = """
         }
     </style>
 </head>
+
 <body>
 <header>
     <h1>LuvdiscsWeb</h1>
@@ -358,6 +451,7 @@ BASE_HTML = """
 
 <nav>
     <a href="{{ main_base }}/">Home</a>
+    <a href="{{ main_base }}/games">Games</a>
     <a href="{{ xtra_base }}/sub">Buy Pro</a>
     <a href="{{ xtra_base }}/redeem">Redeem Code</a>
     <a href="/login">Login</a>
@@ -380,6 +474,7 @@ BASE_HTML = """
 
 def page(title, body, **extra):
     messages = list(get_flashed_messages())
+
     return render_template_string(
         BASE_HTML,
         title=title,
@@ -396,49 +491,161 @@ def page(title, body, **extra):
 @app.route("/")
 def home():
     host = request.host.split(":")[0].lower()
+
     if host == "xtra.luvdiscsweb.xyz":
         return redirect("/sub")
 
     body = """
     <h2>Welcome to LuvdiscsWeb!</h2>
+
     <p>This is a place where you get to see all of Luvdisc's HTML games!</p>
 
     <p>
-        <a class="button" href="{{ xtra_base }}/sub">Buy Pro</a>
+        Free users can play singleplayer game shows.
+        Premium users unlock multiplayer.
     </p>
 
     <p>
-        <a class="button" href="/games">Go to Games</a>
+        <a class="button" href="/games">Play Game Shows</a>
+        <a class="button" href="{{ xtra_base }}/sub">Buy Pro</a>
     </p>
     """
-    return page("Home", render_template_string(body, xtra_base=XTRA_BASE_URL))
+
+    return page(
+        "Home",
+        render_template_string(body, xtra_base=XTRA_BASE_URL),
+    )
 
 
 @app.route("/games")
 def games():
+    user = current_user()
+    active_plan = active_plan_for_user(user)
+    has_multiplayer = user_has_plan(user, "premium")
+
     body = """
-    <h2>Games!</h2>
-    <p>Put your game links here.</p>
+    <h2>Game Shows</h2>
 
-    <button onclick="location.href='/cookie'">Cookie Clicker</button>
+    <p>
+        Free users can play singleplayer.
+        Premium users unlock multiplayer for all 3 game shows.
+    </p>
+
+    <p><b>Your plan:</b> {{ active_plan }}</p>
+
+    <div class="cards">
+        {% for key, game in game_shows.items() %}
+            <div class="card">
+                <h3>{{ game.name }}</h3>
+                <p>{{ game.description }}</p>
+
+                <a class="button" href="/game-show/{{ key }}/singleplayer">
+                    Play Singleplayer
+                </a>
+
+                {% if has_multiplayer %}
+                    <a class="button" href="/game-show/{{ key }}/multiplayer">
+                        Play Multiplayer
+                    </a>
+                {% else %}
+                    <div class="locked">
+                        <p><b>Multiplayer locked.</b></p>
+                        <p>Upgrade to Premium to unlock multiplayer.</p>
+
+                        <a class="button" href="{{ xtra_base }}/sub">
+                            Unlock with Premium
+                        </a>
+                    </div>
+                {% endif %}
+            </div>
+        {% endfor %}
+    </div>
     """
-    return page("Games", body)
+
+    return page(
+        "Games",
+        render_template_string(
+            body,
+            game_shows=GAME_SHOWS,
+            active_plan=active_plan,
+            has_multiplayer=has_multiplayer,
+            xtra_base=XTRA_BASE_URL,
+        ),
+    )
 
 
-@app.route("/cookie")
-def cookie():
+@app.route("/game-show/<game_key>/<mode>")
+def play_game_show(game_key, mode):
+    if game_key not in GAME_SHOWS:
+        flash("That game does not exist.")
+        return redirect("/games")
+
+    if mode not in ["singleplayer", "multiplayer"]:
+        flash("That game mode does not exist.")
+        return redirect("/games")
+
+    game = GAME_SHOWS[game_key]
+    user = current_user()
+
+    if mode == "multiplayer":
+        if not user:
+            flash("Please log in to use multiplayer.")
+            return redirect("/login")
+
+        if not user_has_plan(user, "premium"):
+            flash("Multiplayer requires Premium or higher.")
+            return redirect(f"{XTRA_BASE_URL}/sub")
+
     body = """
-    <h2>Cookie Clicker</h2>
-    <p>Coming soon!</p>
+    <h2>{{ game.name }} - {{ mode.title() }}</h2>
+
+    {% if mode == "singleplayer" %}
+        <p>You are playing the free singleplayer version.</p>
+    {% else %}
+        <p>You unlocked multiplayer with Premium or higher!</p>
+    {% endif %}
+
+    <div class="card">
+        <h3>Game Placeholder</h3>
+
+        <p>
+            This is where the actual {{ game.name }} {{ mode }} game will go.
+        </p>
+
+        {% if game_key == "price-is-right" %}
+            <p><b>Example idea:</b> Guess the price closest without going over.</p>
+        {% elif game_key == "wheel-of-fortune" %}
+            <p><b>Example idea:</b> Spin the wheel, guess letters, and solve the phrase.</p>
+        {% elif game_key == "jeopardy" %}
+            <p><b>Example idea:</b> Pick a category and answer trivia questions.</p>
+        {% endif %}
+    </div>
+
+    <p>
+        <a class="button" href="/games">Back to Games</a>
+    </p>
     """
-    return page("Cookie Clicker", body)
+
+    return page(
+        f"{game['name']} {mode.title()}",
+        render_template_string(
+            body,
+            game=game,
+            game_key=game_key,
+            mode=mode,
+        ),
+    )
 
 
 @app.route("/sub")
 def sub():
     body = """
     <h2>Choose a Plan</h2>
-    <p>Payments are not turned on yet. For now, use redeem codes.</p>
+
+    <p>
+        Payments are not turned on yet.
+        For now, use redeem codes.
+    </p>
 
     <div class="cards">
         {% for key, plan in plans.items() %}
@@ -458,7 +665,11 @@ def sub():
         <a class="button" href="/redeem">Redeem Code</a>
     </p>
     """
-    return page("Subscriptions", render_template_string(body, plans=PLANS))
+
+    return page(
+        "Subscriptions",
+        render_template_string(body, plans=PLANS),
+    )
 
 
 @app.route("/redeem", methods=["GET", "POST"])
@@ -514,14 +725,17 @@ def redeem():
 
     body = """
     <h2>Redeem Code</h2>
+
     <p>Enter your 20-character code here.</p>
 
     <form method="post">
         <label>Code</label>
         <input name="code" placeholder="ABCD1234EFGH5678IJKL" required>
+
         <button type="submit">Redeem</button>
     </form>
     """
+
     return page("Redeem", body)
 
 
@@ -548,8 +762,10 @@ def signup():
                     """,
                     (username, generate_password_hash(password), now_iso()),
                 )
+
             flash("Account created! You can log in now.")
             return redirect("/login")
+
         except sqlite3.IntegrityError:
             flash("That username is already taken.")
             return redirect("/signup")
@@ -567,6 +783,7 @@ def signup():
         <button type="submit">Create Account</button>
     </form>
     """
+
     return page("Signup", body)
 
 
@@ -587,6 +804,7 @@ def login():
             return redirect("/login")
 
         session["user_id"] = user["id"]
+
         flash("Logged in!")
         return redirect("/account")
 
@@ -603,6 +821,7 @@ def login():
         <button type="submit">Login</button>
     </form>
     """
+
     return page("Login", body)
 
 
@@ -610,6 +829,7 @@ def login():
 def logout():
     session.pop("user_id", None)
     session.pop("admin_logged_in", None)
+
     flash("Logged out.")
     return redirect("/")
 
@@ -619,11 +839,12 @@ def logout():
 def account():
     user = current_user()
 
-    plan_key = user["plan"] or "free"
-    plan_name = "Free"
+    active_plan = active_plan_for_user(user)
 
-    if plan_key in PLANS:
-        plan_name = PLANS[plan_key]["name"]
+    if active_plan in PLANS:
+        plan_name = PLANS[active_plan]["name"]
+    else:
+        plan_name = "Free"
 
     expires = user["plan_expires_at"] or "No pro plan yet"
 
@@ -635,13 +856,20 @@ def account():
     <p><b>Expires:</b> {{ expires }}</p>
 
     <p>
+        <a class="button" href="/games">Play Games</a>
         <a class="button" href="/redeem">Redeem Code</a>
         <a class="button" href="/logout">Logout</a>
     </p>
     """
+
     return page(
         "Account",
-        render_template_string(body, user=user, plan_name=plan_name, expires=expires),
+        render_template_string(
+            body,
+            user=user,
+            plan_name=plan_name,
+            expires=expires,
+        ),
     )
 
 
@@ -675,6 +903,7 @@ def admin_login():
         <button type="submit">Login as Admin</button>
     </form>
     """
+
     return page("Admin Login", body)
 
 
@@ -682,23 +911,54 @@ def admin_login():
 @admin_required
 def admin():
     with db() as conn:
-        users_count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
-        codes_count = conn.execute("SELECT COUNT(*) AS c FROM codes").fetchone()["c"]
+        users_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM users"
+        ).fetchone()["c"]
+
+        codes_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM codes"
+        ).fetchone()["c"]
+
         used_codes_count = conn.execute(
             "SELECT COUNT(*) AS c FROM codes WHERE used_by IS NOT NULL"
         ).fetchone()["c"]
-        visitors_count = conn.execute("SELECT COUNT(*) AS c FROM visitors").fetchone()["c"]
-        page_views_count = conn.execute("SELECT COUNT(*) AS c FROM page_views").fetchone()["c"]
+
+        visitors_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM visitors"
+        ).fetchone()["c"]
+
+        page_views_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM page_views"
+        ).fetchone()["c"]
 
     body = """
     <h2>Admin Panel</h2>
 
     <div class="cards">
-        <div class="card"><h3>Users</h3><p>{{ users_count }}</p></div>
-        <div class="card"><h3>Total Codes</h3><p>{{ codes_count }}</p></div>
-        <div class="card"><h3>Used Codes</h3><p>{{ used_codes_count }}</p></div>
-        <div class="card"><h3>Unique Visitors</h3><p>{{ visitors_count }}</p></div>
-        <div class="card"><h3>Page Views</h3><p>{{ page_views_count }}</p></div>
+        <div class="card">
+            <h3>Users</h3>
+            <p>{{ users_count }}</p>
+        </div>
+
+        <div class="card">
+            <h3>Total Codes</h3>
+            <p>{{ codes_count }}</p>
+        </div>
+
+        <div class="card">
+            <h3>Used Codes</h3>
+            <p>{{ used_codes_count }}</p>
+        </div>
+
+        <div class="card">
+            <h3>Unique Visitors</h3>
+            <p>{{ visitors_count }}</p>
+        </div>
+
+        <div class="card">
+            <h3>Page Views</h3>
+            <p>{{ page_views_count }}</p>
+        </div>
     </div>
 
     <p>
@@ -707,6 +967,7 @@ def admin():
         <a class="button" href="/logout">Logout</a>
     </p>
     """
+
     return page(
         "Admin",
         render_template_string(
@@ -737,6 +998,7 @@ def admin_settings():
             if len(new_password) < 4:
                 flash("Admin password must be at least 4 characters.")
                 return redirect("/admin/settings")
+
             set_setting("admin_password_hash", generate_password_hash(new_password))
 
         flash("Admin login updated.")
@@ -757,9 +1019,13 @@ def admin_settings():
         <button type="submit">Save</button>
     </form>
     """
+
     return page(
         "Admin Settings",
-        render_template_string(body, admin_username=admin_username),
+        render_template_string(
+            body,
+            admin_username=admin_username,
+        ),
     )
 
 
@@ -789,6 +1055,7 @@ def admin_codes():
             for _ in range(amount):
                 while True:
                     code = make_code(20)
+
                     try:
                         conn.execute(
                             """
@@ -797,8 +1064,10 @@ def admin_codes():
                             """,
                             (code, plan, months, now_iso()),
                         )
+
                         generated_codes.append(code)
                         break
+
                     except sqlite3.IntegrityError:
                         continue
 
@@ -837,6 +1106,7 @@ def admin_codes():
 
     {% if generated_codes %}
         <h3>New Codes</h3>
+
         <ul>
             {% for code in generated_codes %}
                 <li><code>{{ code }}</code></li>
@@ -845,6 +1115,7 @@ def admin_codes():
     {% endif %}
 
     <h3>Recent Codes</h3>
+
     <table>
         <tr>
             <th>Code</th>
@@ -852,6 +1123,7 @@ def admin_codes():
             <th>Months</th>
             <th>Used By</th>
         </tr>
+
         {% for code in recent_codes %}
             <tr>
                 <td><code>{{ code.code }}</code></td>
@@ -862,6 +1134,7 @@ def admin_codes():
         {% endfor %}
     </table>
     """
+
     return page(
         "Generate Codes",
         render_template_string(
@@ -883,7 +1156,32 @@ def redeem_code_redirect():
     return redirect(f"{XTRA_BASE_URL}/redeem")
 
 
+@app.errorhandler(404)
+def not_found(error):
+    body = """
+    <h2>Page Not Found</h2>
+    <p>That page does not exist.</p>
+    <p><a class="button" href="/">Go Home</a></p>
+    """
+
+    return page("404", body), 404
+
+
+@app.errorhandler(500)
+def server_error(error):
+    body = """
+    <h2>Server Error</h2>
+    <p>Something broke in the app. Check your Render logs for the exact error.</p>
+    <p><a class="button" href="/">Go Home</a></p>
+    """
+
+    return page("500", body), 500
+
+
 init_db()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 5000)),
+    )
