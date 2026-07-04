@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: luvdiscsweb
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: DB_PATH
+        value: /var/data/luvdiscsweb.db
+      - key: SESSION_COOKIE_DOMAIN
+        value: .luvdiscsweb.xyz
+      - key: LINKTREE_URL
+        sync: false
+      - key: DISCORD_FRIEND_INFO
+        sync: false
